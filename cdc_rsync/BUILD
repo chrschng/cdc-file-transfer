@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
 package(default_visibility = [
     "//:__subpackages__",
 ])
@@ -77,6 +79,7 @@ cc_library(
         ":file_finder_and_sender",
         ":parallel_file_opener",
         ":progress_tracker",
+        ":server_arch",
         ":zstd_stream",
         "//cdc_rsync/base:cdc_interface",
         "//cdc_rsync/base:message_pump",
@@ -91,7 +94,6 @@ cc_library(
         "//common:port_manager",
         "//common:process",
         "//common:remote_util",
-        "//common:sdk_util",
         "//common:status",
         "//common:status_macros",
         "//common:threadpool",
@@ -129,6 +131,7 @@ cc_library(
     hdrs = ["params.h"],
     deps = [
         ":cdc_rsync_client",
+        "//common:port_range_parser",
         "@com_github_zstd//:zstd",
         "@com_google_absl//absl/status",
     ],
@@ -166,6 +169,28 @@ cc_test(
         "//cdc_rsync/protos:messages_cc_proto",
         "//common:test_main",
         "//common:testing_clock",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "server_arch",
+    srcs = ["server_arch.cc"],
+    hdrs = ["server_arch.h"],
+    deps = [
+        "//common:path",
+        "//common:remote_util",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "server_arch_test",
+    srcs = ["server_arch_test.cc"],
+    deps = [
+        ":server_arch",
+        "//common:test_main",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
     ],
 )

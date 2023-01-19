@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
 package(default_visibility = ["//:__subpackages__"])
 
 cc_library(
@@ -119,6 +121,8 @@ cc_library(
         "manifest_updater.h",
         "pending_assets_queue.h",
     ],
+    # Tests don't work under Linux, but we only need it on Windows, anyway.
+    target_compatible_with = ["@platforms//os:windows"],
     deps = [
         ":file_chunk_map",
         ":manifest_builder",

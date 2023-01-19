@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -35,16 +37,18 @@ cc_library(
             # Additional warnings from @com_github_dirent
             "/wd4505",  # unreferenced function with internal linkage has been removed
         ],
-        "//conditions:default": ["/wd4505"],
+        "//conditions:default": [],
     }),
     deps = [
         ":path",
         ":platform",
-        "@com_github_dirent//:dirent",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
-    ],
+    ] + select({
+        "//tools:windows": ["@com_github_dirent//:dirent"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_test(
@@ -246,6 +250,25 @@ cc_test(
         ":stub_process",
         ":test_main",
         ":testing_clock",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "port_range_parser",
+    srcs = ["port_range_parser.cc"],
+    hdrs = ["port_range_parser.h"],
+    deps = [
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "port_range_parser_test",
+    srcs = ["port_range_parser_test.cc"],
+    deps = [
+        ":port_range_parser",
+        ":test_main",
         "@com_google_googletest//:gtest",
     ],
 )

@@ -35,6 +35,12 @@ namespace {
 // Suffix for the patched file created from the basis file and the diff.
 constexpr char kIntermediatePathSuffix[] = ".__cdc_rsync_temp__";
 
+#if PLATFORM_WINDOWS
+constexpr char kServerFilename[] = "cdc_rsync_server.exe";
+#elif PLATFORM_LINUX
+constexpr char kServerFilename[] = "cdc_rsync_server";
+#endif
+
 uint16_t kExecutableBits =
     path::MODE_IXUSR | path::MODE_IXGRP | path::MODE_IXOTH;
 
@@ -148,10 +154,7 @@ PathFilter::Rule::Type ToInternalType(
 
 CdcRsyncServer::CdcRsyncServer() = default;
 
-CdcRsyncServer::~CdcRsyncServer() {
-  message_pump_.reset();
-  socket_.reset();
-}
+CdcRsyncServer::~CdcRsyncServer() = default;
 
 bool CdcRsyncServer::CheckComponents(
     const std::vector<GameletComponent>& components) {
@@ -163,8 +166,8 @@ bool CdcRsyncServer::CheckComponents(
   }
 
   std::vector<GameletComponent> our_components;
-  status = GameletComponent::Get(
-      {path::Join(component_dir, "cdc_rsync_server")}, &our_components);
+  status = GameletComponent::Get({path::Join(component_dir, kServerFilename)},
+                                 &our_components);
   if (!status.ok() || components != our_components) {
     return false;
   }
@@ -173,8 +176,14 @@ bool CdcRsyncServer::CheckComponents(
 }
 
 absl::Status CdcRsyncServer::Run(int port) {
+  absl::Status status = Socket::Initialize();
+  if (!status.ok()) {
+    return WrapStatus(status, "Failed to initialize sockets");
+  }
+  socket_finalizer_ = std::make_unique<SocketFinalizer>();
+
   socket_ = std::make_unique<ServerSocket>();
-  absl::Status status = socket_->StartListening(port);
+  status = socket_->StartListening(port);
   if (!status.ok()) {
     return WrapStatus(status, "Failed to start listening on port %i", port);
   }
@@ -303,12 +312,19 @@ absl::Status CdcRsyncServer::HandleSetOptions() {
   existing_ = request.existing();
   copy_dest_ = request.copy_dest();
 
-  // (internal): Support \ instead of / in destination folders.
+  // Support \ instead of / in destination folders.
   path::FixPathSeparators(&destination_);
   path::EnsureEndsWithPathSeparator(&destination_);
   if (!copy_dest_.empty()) {
     path::FixPathSeparators(&copy_dest_);
     path::EnsureEndsWithPathSeparator(&copy_dest_);
+  }
+
+  // Expand e.g. ~.
+  status = path::ExpandPathVariables(&destination_);
+  if (!status.ok()) {
+    return WrapStatus(status, "Failed to expand destination '%s'",
+                      destination_);
   }
 
   assert(path_filter_.IsEmpty());
@@ -556,7 +572,7 @@ absl::Status CdcRsyncServer::HandleSendMissingFileData() {
     // Verify that there is no directory existing with the same name.
     if (path::Exists(filepath) && path::DirExists(filepath)) {
       assert(!diff_.extraneous_dirs.empty());
-      absl::Status status = path::RemoveFile(filepath);
+      status = path::RemoveFile(filepath);
       if (!status.ok()) {
         return WrapStatus(
             status, "Failed to remove folder '%s' before creating file '%s'",

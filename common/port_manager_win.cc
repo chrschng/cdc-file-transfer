@@ -121,25 +121,21 @@ PortManager::~PortManager() {
   }
 }
 
-absl::StatusOr<int> PortManager::ReservePort(bool check_remote,
-                                             int remote_timeout_sec) {
+absl::StatusOr<int> PortManager::ReservePort(int remote_timeout_sec) {
   // Find available port on workstation.
   std::unordered_set<int> local_ports;
   ASSIGN_OR_RETURN(local_ports,
                    FindAvailableLocalPorts(first_port_, last_port_, "127.0.0.1",
-                                           process_factory_, false),
+                                           process_factory_),
                    "Failed to find available ports on workstation");
 
   // Find available port on remote instance.
   std::unordered_set<int> remote_ports = local_ports;
-  if (check_remote) {
-    ASSIGN_OR_RETURN(
-        remote_ports,
-        FindAvailableRemotePorts(first_port_, last_port_, "0.0.0.0",
-                                 process_factory_, remote_util_,
-                                 remote_timeout_sec, false, steady_clock_),
-        "Failed to find available ports on instance");
-  }
+  ASSIGN_OR_RETURN(remote_ports,
+                   FindAvailableRemotePorts(first_port_, last_port_, "0.0.0.0",
+                                            process_factory_, remote_util_,
+                                            remote_timeout_sec, steady_clock_),
+                   "Failed to find available ports on instance");
 
   // Fetch shared memory.
   void* mem;
@@ -206,7 +202,7 @@ absl::Status PortManager::ReleasePort(int port) {
 // static
 absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailableLocalPorts(
     int first_port, int last_port, const char* ip,
-    ProcessFactory* process_factory, bool forward_output_to_log) {
+    ProcessFactory* process_factory) {
   // -a to get the connection and ports the computer is listening on.
   // -n to get numerical addresses to avoid the overhead of determining names.
   // -p tcp to limit the output to TCPv4 connections.
@@ -214,16 +210,23 @@ absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailableLocalPorts(
   ProcessStartInfo start_info;
   start_info.command = "netstat -a -n -p tcp";
   start_info.name = "netstat";
+  start_info.flags = ProcessFlags::kNoWindow;
 
   std::string output;
   start_info.stdout_handler = [&output](const char* data, size_t data_size) {
     output.append(data, data_size);
     return absl::OkStatus();
   };
-  start_info.forward_output_to_log = forward_output_to_log;
+  std::string errors;
+  start_info.stderr_handler = [&errors](const char* data, size_t data_size) {
+    errors.append(data, data_size);
+    return absl::OkStatus();
+  };
 
   absl::Status status = process_factory->Run(start_info);
-  if (!status.ok()) return WrapStatus(status, "Failed to run netstat");
+  if (!status.ok()) {
+    return WrapStatus(status, "Failed to run netstat:\n%s", errors);
+  }
 
   LOG_DEBUG("netstat (workstation) output:\n%s", output);
   return FindAvailablePorts(first_port, last_port, output, ip);
@@ -233,7 +236,7 @@ absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailableLocalPorts(
 absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailableRemotePorts(
     int first_port, int last_port, const char* ip,
     ProcessFactory* process_factory, RemoteUtil* remote_util, int timeout_sec,
-    bool forward_output_to_log, SteadyClock* steady_clock) {
+    SteadyClock* steady_clock) {
   // --numeric to get numerical addresses.
   // --listening to get only listening sockets.
   // --tcp to get only TCP connections.
@@ -241,18 +244,22 @@ absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailableRemotePorts(
   ProcessStartInfo start_info =
       remote_util->BuildProcessStartInfoForSsh(remote_command);
   start_info.name = "netstat";
+  start_info.flags = ProcessFlags::kNoWindow;
 
   std::string output;
   start_info.stdout_handler = [&output](const char* data, size_t data_size) {
     output.append(data, data_size);
     return absl::OkStatus();
   };
-  start_info.forward_output_to_log = forward_output_to_log;
+  std::string errors;
+  start_info.stderr_handler = [&errors](const char* data, size_t data_size) {
+    errors.append(data, data_size);
+    return absl::OkStatus();
+  };
 
   std::unique_ptr<Process> process = process_factory->Create(start_info);
   absl::Status status = process->Start();
-  if (!status.ok())
-    return WrapStatus(status, "Failed to start netstat process");
+  if (!status.ok()) return WrapStatus(status, "Failed to start netstat");
 
   Stopwatch timeout_timer(steady_clock);
   bool is_timeout = false;
@@ -266,8 +273,10 @@ absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailableRemotePorts(
     return absl::DeadlineExceededError("Timeout while running netstat");
 
   uint32_t exit_code = process->ExitCode();
-  if (exit_code != 0)
-    return MakeStatus("netstat process exited with code %u", exit_code);
+  if (exit_code != 0) {
+    return MakeStatus("netstat process exited with code %u:\n%s", exit_code,
+                      errors);
+  }
 
   LOG_DEBUG("netstat (instance) output:\n%s", output);
   return FindAvailablePorts(first_port, last_port, output, ip);
@@ -278,9 +287,14 @@ absl::StatusOr<std::unordered_set<int>> PortManager::FindAvailablePorts(
     int first_port, int last_port, const std::string& netstat_output,
     const char* ip) {
   std::unordered_set<int> available_ports;
-  for (int port = first_port; port <= last_port; ++port) {
-    std::vector<std::string> lines = absl::StrSplit(netstat_output, '\n');
+  std::vector<std::string> lines;
+  for (const auto& line : absl::StrSplit(netstat_output, '\n')) {
+    if (absl::StrContains(line, ip)) {
+      lines.push_back(std::string(line));
+    }
+  }
 
+  for (int port = first_port; port <= last_port; ++port) {
     bool port_occupied = false;
     std::string portToken = absl::StrFormat("%s:%i", ip, port);
     for (const std::string& line : lines) {

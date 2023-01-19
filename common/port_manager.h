@@ -51,14 +51,11 @@ class PortManager {
   // Reserves a port in the range passed to the constructor. The port is
   // released automatically upon destruction if ReleasePort() is not called
   // explicitly.
-  // |check_remote| determines whether the remote port should be checked as
-  // well. If false, the check is skipped and a port might be returned that is
-  // still in use remotely.
   // |remote_timeout_sec| is the timeout for finding available ports on the
-  // remote instance. Not used if |check_remote| is false.
+  // remote instance.
   // Returns a DeadlineExceeded error if the timeout is exceeded.
   // Returns a ResourceExhausted error if no ports are available.
-  absl::StatusOr<int> ReservePort(bool check_remote, int remote_timeout_sec);
+  absl::StatusOr<int> ReservePort(int remote_timeout_sec);
 
   // Releases a reserved port.
   absl::Status ReleasePort(int port);
@@ -71,12 +68,10 @@ class PortManager {
   // forwarding on the local workstation.
   // |ip| is the IP address to filter by.
   // |process_factory| is used to create a netstat process.
-  // |forward_output_to_log| determines whether the stderr of netstat is
-  // forwarded to the logs. Returns ResourceExhaustedError if no port is
-  // available.
+  // Returns ResourceExhaustedError if no port is available.
   static absl::StatusOr<std::unordered_set<int>> FindAvailableLocalPorts(
       int first_port, int last_port, const char* ip,
-      ProcessFactory* process_factory, bool forward_output_to_log);
+      ProcessFactory* process_factory);
 
   // Finds available ports in the range [first_port, last_port] for port
   // forwarding on the instance.
@@ -84,13 +79,11 @@ class PortManager {
   // |process_factory| is used to create a netstat process.
   // |remote_util| is used to connect to the instance.
   // |timeout_sec| is the connection timeout in seconds.
-  // |forward_output_to_log| determines whether the stderr of netstat is
-  // forwarded to the logs. Returns a DeadlineExceeded error if the timeout is
-  // exceeded. Returns ResourceExhaustedError if no port is available.
+  // Returns a DeadlineExceeded error if the timeout is exceeded.
+  // Returns ResourceExhaustedError if no port is available.
   static absl::StatusOr<std::unordered_set<int>> FindAvailableRemotePorts(
       int first_port, int last_port, const char* ip,
       ProcessFactory* process_factory, RemoteUtil* remote_util, int timeout_sec,
-      bool forward_output_to_log,
       SteadyClock* steady_clock = DefaultSteadyClock::GetInstance());
 
  private:

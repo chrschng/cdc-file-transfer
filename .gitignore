@@ -11,3 +11,5 @@ dependencies
 *.includes
 .qtc_clangd
 bazel-*
+user.bazelrc
+*.pyc

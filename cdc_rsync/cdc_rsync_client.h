@@ -31,12 +31,12 @@
 namespace cdc_ft {
 
 class Process;
+class ServerArch;
 class ZstdStream;
 
 class CdcRsyncClient {
  public:
   struct Options {
-    int port = RemoteUtil::kDefaultSshPort;
     bool delete_ = false;
     bool recursive = false;
     int verbosity = 0;
@@ -51,10 +51,16 @@ class CdcRsyncClient {
     std::string copy_dest;
     int compress_level = 6;
     int connection_timeout_sec = 10;
+    int forward_port_first = 44450;
+    int forward_port_last = 44459;
     std::string ssh_command;
-    std::string scp_command;
+    std::string sftp_command;
     std::string sources_dir;  // Base dir for files loaded for --files-from.
     PathFilter filter;
+
+    // Backwards compatibility for switching from scp to sftp.
+    // Used internally, do not use.
+    std::string deprecated_scp_command;
 
     // Compression level 0 is invalid.
     static constexpr int kMinCompressLevel = -5;
@@ -70,9 +76,12 @@ class CdcRsyncClient {
   absl::Status Run();
 
  private:
+  // Finds available local and remote ports for port forwarding.
+  absl::StatusOr<int> FindAvailablePort();
+
   // Starts the server process. If the method returns a status with tag
   // |kTagDeployServer|, Run() calls DeployServer() and tries again.
-  absl::Status StartServer();
+  absl::Status StartServer(int port, const ServerArch& arch);
 
   // Stops the server process.
   absl::Status StopServer();
@@ -84,7 +93,7 @@ class CdcRsyncClient {
   absl::Status Sync();
 
   // Copies all gamelet components to the gamelet.
-  absl::Status DeployServer();
+  absl::Status DeployServer(const ServerArch& arch);
 
   // Sends relevant options to the server.
   absl::Status SendOptions();
@@ -118,11 +127,11 @@ class CdcRsyncClient {
 
   Options options_;
   std::vector<std::string> sources_;
-  const std::string user_host_;
   const std::string destination_;
   WinProcessFactory process_factory_;
   RemoteUtil remote_util_;
   PortManager port_manager_;
+  std::unique_ptr<SocketFinalizer> socket_finalizer_;
   ClientSocket socket_;
   MessagePump message_pump_{&socket_, MessagePump::PacketReceivedDelegate()};
   ConsoleProgressPrinter printer_;

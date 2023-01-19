@@ -230,7 +230,7 @@ TEST_F(ProcessTest, RunUntil) {
   ProcessStartInfo start_info;
   start_info.command = "findstr stop";
   start_info.redirect_stdin = true;
-  std::atomic_bool stop(false);
+  std::atomic_bool stop{false};
   start_info.stdout_handler = [&std_out, &stop](const char* data, size_t) {
     // Check whether someone sent the "stop" command.
     // Note: This runs in a background thread.
@@ -313,8 +313,10 @@ TEST_F(ProcessTest, LogOutputLevelDetection) {
 }
 
 TEST_F(ProcessTest, Terminate) {
+  // Use ping to simulate a sleep instead of timeout since timeout fails with
+  // "Input redirection is not supported".
   ProcessStartInfo start_info;
-  start_info.command = "timeout /T 30";
+  start_info.command = "ping -n 30 127.0.0.1";
   std::unique_ptr<Process> process = process_factory_.Create(start_info);
   EXPECT_OK(process->Start());
   EXPECT_EQ(process->ExitCode(), Process::kExitCodeStillRunning);
@@ -323,19 +325,36 @@ TEST_F(ProcessTest, Terminate) {
 }
 
 TEST_F(ProcessTest, TerminateAlreadyExited) {
+  // Use ping to simulate a sleep instead of timeout since timeout fails with
+  // "Input redirection is not supported".
   ProcessStartInfo start_info;
-  start_info.command = "timeout /T 30";
+  start_info.command = "ping -n 30 127.0.0.1";
   std::unique_ptr<Process> process = process_factory_.Create(start_info);
   EXPECT_OK(process->Start());
   EXPECT_FALSE(process->HasExited());
   bool terminated = false;
   Stopwatch sw;
   while (sw.ElapsedSeconds() < 5 && !terminated) {
-    terminated = TerminateProcessByName("timeout.exe");
+    terminated = TerminateProcessByName("ping.exe");
     if (!terminated) Util::Sleep(1);
   }
   EXPECT_TRUE(terminated);
   EXPECT_OK(process->Terminate());
+}
+
+TEST_F(ProcessTest, StartupDir) {
+  ProcessStartInfo start_info;
+  start_info.command = "cmd /C cd";
+  start_info.startup_dir = "C:\\";
+
+  std::string std_out;
+  start_info.stdout_handler = [&std_out](const char* data, size_t) {
+    std_out += data;
+    return absl::OkStatus();
+  };
+
+  EXPECT_OK(process_factory_.Run(start_info));
+  EXPECT_EQ(std_out, "C:\\\r\n");
 }
 
 }  // namespace

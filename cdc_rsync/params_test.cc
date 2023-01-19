@@ -32,6 +32,10 @@ constexpr char kUserHostDst[] = "user@host:destination";
 constexpr char kUserHost[] = "user@host";
 constexpr char kDst[] = "destination";
 
+constexpr char kSshCommandEnvVar[] = "CDC_SSH_COMMAND";
+constexpr char kScpCommandEnvVar[] = "CDC_SCP_COMMAND";
+constexpr char kSftpCommandEnvVar[] = "CDC_SFTP_COMMAND";
+
 class TestLog : public Log {
  public:
   explicit TestLog() : Log(LogLevel::kInfo) {}
@@ -60,6 +64,11 @@ class ParamsTest : public ::testing::Test {
   void TearDown() override {
     std::cout.rdbuf(prev_stdout_);
     std::cerr.rdbuf(prev_stderr_);
+
+    // Clear env. They seem to be sticky sometimes and leak into other tests.
+    path::SetEnv(kSshCommandEnvVar, "");
+    path::SetEnv(kScpCommandEnvVar, "");
+    path::SetEnv(kSftpCommandEnvVar, "");
   }
 
  protected:
@@ -97,7 +106,6 @@ class ParamsTest : public ::testing::Test {
 TEST_F(ParamsTest, ParseSucceedsDefaults) {
   const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst, NULL};
   EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
-  EXPECT_EQ(RemoteUtil::kDefaultSshPort, parameters_.options.port);
   EXPECT_FALSE(parameters_.options.delete_);
   EXPECT_FALSE(parameters_.options.recursive);
   EXPECT_EQ(0, parameters_.options.verbosity);
@@ -145,13 +153,6 @@ TEST_F(ParamsTest, ParseFailsOnCompressLevelEqualsNoValue) {
   ExpectError(NeedsValueError("compress-level"));
 }
 
-TEST_F(ParamsTest, ParseFailsOnPortEqualsNoValue) {
-  const char* argv[] = {"cdc_rsync.exe", "--port=", kSrc, kUserHostDst, NULL};
-  EXPECT_FALSE(
-      Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
-  ExpectError(NeedsValueError("port"));
-}
-
 TEST_F(ParamsTest, ParseFailsOnContimeoutEqualsNoValue) {
   const char* argv[] = {"cdc_rsync.exe", "--contimeout=", kSrc, kUserHostDst,
                         NULL};
@@ -160,22 +161,55 @@ TEST_F(ParamsTest, ParseFailsOnContimeoutEqualsNoValue) {
   ExpectError(NeedsValueError("contimeout"));
 }
 
-TEST_F(ParamsTest, ParseSucceedsWithSshScpCommands) {
-  const char* argv[] = {"cdc_rsync.exe",        kSrc,
-                        kUserHostDst,           "--ssh-command=sshcmd",
-                        "--scp-command=scpcmd", NULL};
+TEST_F(ParamsTest, ParseSucceedsWithSshSftpCommands) {
+  const char* argv[] = {
+      "cdc_rsync.exe",          kSrc, kUserHostDst, "--ssh-command=sshcmd",
+      "--sftp-command=sftpcmd", NULL};
   EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
-  EXPECT_EQ(parameters_.options.scp_command, "scpcmd");
+  EXPECT_EQ(parameters_.options.sftp_command, "sftpcmd");
   EXPECT_EQ(parameters_.options.ssh_command, "sshcmd");
 }
 
-TEST_F(ParamsTest, ParseSucceedsWithSshScpCommandsByEnvVars) {
-  EXPECT_OK(path::SetEnv("CDC_SSH_COMMAND", "sshcmd"));
-  EXPECT_OK(path::SetEnv("CDC_SCP_COMMAND", "scpcmd"));
+TEST_F(ParamsTest, ParseSucceedsWithSshSftpCommandsByEnvVars) {
+  EXPECT_OK(path::SetEnv(kSshCommandEnvVar, "sshcmd"));
+  EXPECT_OK(path::SetEnv(kSftpCommandEnvVar, "sftpcmd"));
   const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst, NULL};
   EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
-  EXPECT_EQ(parameters_.options.scp_command, "scpcmd");
+  EXPECT_EQ(parameters_.options.sftp_command, "sftpcmd");
   EXPECT_EQ(parameters_.options.ssh_command, "sshcmd");
+}
+
+TEST_F(ParamsTest, ParseSucceedsWithScpCommandFallback) {
+  const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst,
+                        "--scp-command=C:\\scp.exe foo", NULL};
+  EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  EXPECT_EQ(parameters_.options.sftp_command, "C:\\sftp.exe foo");
+}
+
+TEST_F(ParamsTest, ParseSucceedsWithScpCommandFallbackByEnvVar) {
+  EXPECT_OK(path::SetEnv(kScpCommandEnvVar, "C:\\scp.exe foo"));
+  const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst, NULL};
+  EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  EXPECT_EQ(parameters_.options.sftp_command, "C:\\sftp.exe foo");
+}
+
+TEST_F(ParamsTest, ParseSucceedsWithSftpOverwritingScp) {
+  const char* argv[] = {"cdc_rsync.exe",
+                        kSrc,
+                        kUserHostDst,
+                        "--scp-command=C:\\scp.exe foo",
+                        "--sftp-command=sftpcmd",
+                        NULL};
+  EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  EXPECT_EQ(parameters_.options.sftp_command, "sftpcmd");
+}
+
+TEST_F(ParamsTest, ParseSucceedsWithSftpEnvVarOverwritingScp) {
+  EXPECT_OK(path::SetEnv(kSftpCommandEnvVar, "sftpcmd"));
+  const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst,
+                        "--scp-command=C:\\scp.exe foo", NULL};
+  EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  EXPECT_EQ(parameters_.options.sftp_command, "sftpcmd");
 }
 
 TEST_F(ParamsTest, ParseSucceedsWithNoSshCommand) {
@@ -186,12 +220,12 @@ TEST_F(ParamsTest, ParseSucceedsWithNoSshCommand) {
   ExpectError(NeedsValueError("ssh-command"));
 }
 
-TEST_F(ParamsTest, ParseSucceedsWithNoScpCommand) {
-  const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst, "--scp-command",
+TEST_F(ParamsTest, ParseSucceedsWithNoSftpCommand) {
+  const char* argv[] = {"cdc_rsync.exe", kSrc, kUserHostDst, "--sftp-command",
                         NULL};
   EXPECT_FALSE(
       Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
-  ExpectError(NeedsValueError("scp-command"));
+  ExpectError(NeedsValueError("sftp-command"));
 }
 
 TEST_F(ParamsTest, ParseFailsOnNoUserHost) {
@@ -285,13 +319,18 @@ TEST_F(ParamsTest, ParseFailsOnUnknownKey) {
 }
 
 TEST_F(ParamsTest, ParseSucceedsWithSupportedKeyValue) {
-  const char* argv[] = {
-      "cdc_rsync.exe", "--compress-level", "11", "--contimeout", "99", "--port",
-      "4086",          "--copy-dest=dest", kSrc, kUserHostDst,   NULL};
+  const char* argv[] = {"cdc_rsync.exe",
+                        "--compress-level",
+                        "11",
+                        "--contimeout",
+                        "99",
+                        "--copy-dest=dest",
+                        kSrc,
+                        kUserHostDst,
+                        NULL};
   EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
   EXPECT_EQ(parameters_.options.compress_level, 11);
   EXPECT_EQ(parameters_.options.connection_timeout_sec, 99);
-  EXPECT_EQ(parameters_.options.port, 4086);
   EXPECT_EQ(parameters_.options.copy_dest, "dest");
   ExpectNoError();
 }
@@ -302,13 +341,6 @@ TEST_F(ParamsTest, ParseSucceedsWithSupportedKeyValueWithoutEqualityForChars) {
   EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
   EXPECT_EQ(parameters_.options.copy_dest, "dest");
   ExpectNoError();
-}
-
-TEST_F(ParamsTest, ParseFailsOnInvalidPort) {
-  const char* argv[] = {"cdc_rsync.exe", "--port=0", kSrc, kUserHostDst, NULL};
-  EXPECT_FALSE(
-      Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
-  ExpectError("--port must specify a valid port");
 }
 
 TEST_F(ParamsTest, ParseFailsOnDeleteNeedsRecursive) {
@@ -544,6 +576,40 @@ TEST_F(ParamsTest, IncludeExcludeMixed_ProperOrder) {
   EXPECT_EQ(rules[4].type, PathFilter::Rule::Type::kInclude);
   EXPECT_EQ(rules[4].pattern, "incl1");
   ExpectNoError();
+}
+
+TEST_F(ParamsTest, ForwardPort_Single) {
+  const char* argv[] = {"cdc_rsync.exe", "--forward-port=65535", kSrc,
+                        kUserHostDst, NULL};
+  EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  EXPECT_EQ(parameters_.options.forward_port_first, 65535);
+  EXPECT_EQ(parameters_.options.forward_port_last, 65535);
+  ExpectNoError();
+}
+
+TEST_F(ParamsTest, ForwardPort_Range) {
+  const char* argv[] = {
+      "cdc_rsync.exe", "--forward-port", "1-2", kSrc, kUserHostDst, NULL};
+  EXPECT_TRUE(Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  EXPECT_EQ(parameters_.options.forward_port_first, 1);
+  EXPECT_EQ(parameters_.options.forward_port_last, 2);
+  ExpectNoError();
+}
+
+TEST_F(ParamsTest, ForwardPort_NoValue) {
+  const char* argv[] = {"cdc_rsync.exe", "--forward-port=", kSrc, kUserHostDst,
+                        NULL};
+  EXPECT_FALSE(
+      Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  ExpectError(NeedsValueError("forward-port"));
+}
+
+TEST_F(ParamsTest, ForwardPort_BadValueTooSmall) {
+  const char* argv[] = {"cdc_rsync.exe", "--forward-port=0", kSrc, kUserHostDst,
+                        NULL};
+  EXPECT_FALSE(
+      Parse(static_cast<int>(std::size(argv)) - 1, argv, &parameters_));
+  ExpectError("Failed to parse");
 }
 
 }  // namespace

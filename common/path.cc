@@ -37,6 +37,7 @@
 #include <stdlib.h>  // putenv
 #include <unistd.h>  // readlink
 #include <utime.h>   // struct utimbuf
+#include <wordexp.h>
 #define __stat64 stat64
 #define _chmod chmod
 #endif
@@ -198,8 +199,8 @@ absl::Status GetKnownFolderPath(FolderId folder_id, std::string* path) {
 }
 #endif
 
+absl::Status ExpandPathVariables(std::string* path) {
 #if PLATFORM_WINDOWS
-absl::Status ExpandEnvironmentPathVariables(std::string* path) {
   std::wstring wchar_path = Util::Utf8ToWideStr(*path);
 
   DWORD size = ::ExpandEnvironmentStrings(wchar_path.c_str(), nullptr, 0);
@@ -217,8 +218,18 @@ absl::Status ExpandEnvironmentPathVariables(std::string* path) {
   wchar_expanded.pop_back();
   *path = Util::WideToUtf8Str(wchar_expanded);
   return absl::OkStatus();
-}
+#else
+  wordexp_t res;
+  wordexp(path->c_str(), &res, 0);
+  if (res.we_wordc > 1) {
+    return absl::InvalidArgumentError(
+        "Path expands to multiple results (did you use * etc. ?");
+  }
+  *path = res.we_wordv[0];
+  wordfree(&res);
+  return absl::OkStatus();
 #endif
+}
 
 absl::Status GetEnv(const std::string& name, std::string* value) {
   value->clear();
@@ -314,6 +325,10 @@ std::string GetDrivePrefix(const std::string& path) {
 #endif  // if PLATFORM_WINDOWS
 
 std::string GetCwd() { return std::filesystem::current_path().u8string(); }
+
+void SetCwd(const std::string& path) {
+  std::filesystem::current_path(std::filesystem::u8path(path));
+}
 
 std::string GetFullPath(const std::string& path) {
   if (path.empty()) {

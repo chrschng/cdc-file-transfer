@@ -16,10 +16,12 @@
 
 #include <regex>
 
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "common/path.h"
-#include "common/status.h"
+#include "common/status_macros.h"
+#include "common/util.h"
 
 namespace cdc_ft {
 namespace {
@@ -34,109 +36,110 @@ std::string GetPortForwardingArg(int local_port, int remote_port,
 
 }  // namespace
 
-RemoteUtil::RemoteUtil(int verbosity, bool quiet,
+RemoteUtil::RemoteUtil(std::string user_host, int verbosity, bool quiet,
                        ProcessFactory* process_factory,
                        bool forward_output_to_log)
-    : verbosity_(verbosity),
+    : user_host_(std::move(user_host)),
+      verbosity_(verbosity),
       quiet_(quiet),
       process_factory_(process_factory),
       forward_output_to_log_(forward_output_to_log) {}
 
-void RemoteUtil::SetUserHostAndPort(std::string user_host, int port) {
-  user_host_ = std::move(user_host);
-  ssh_port_ = port;
-}
 void RemoteUtil::SetScpCommand(std::string scp_command) {
   scp_command_ = std::move(scp_command);
+}
+
+void RemoteUtil::SetSftpCommand(std::string sftp_command) {
+  sftp_command_ = std::move(sftp_command);
 }
 
 void RemoteUtil::SetSshCommand(std::string ssh_command) {
   ssh_command_ = std::move(ssh_command);
 }
 
-absl::Status RemoteUtil::Scp(std::vector<std::string> source_filepaths,
-                             const std::string& dest, bool compress) {
-  absl::Status status = CheckHostPort();
-  if (!status.ok()) {
-    return status;
+// static
+std::string RemoteUtil::ScpToSftpCommand(std::string scp_command) {
+  // "scp", "SCP", "winscp.exe", "C:\path\to\scp", "/scppath/scp --foo" etc.
+  std::string lower_scp_command = scp_command;
+  std::transform(lower_scp_command.begin(), lower_scp_command.end(),
+                 lower_scp_command.begin(), ::tolower);
+  size_t pos = 0;
+  while ((pos = lower_scp_command.find("scp", pos)) != std::string::npos) {
+    // This may access the string at scp_command.size(), but that's well defined
+    // in C++11 and returns 0.
+    const char next_ch = lower_scp_command[pos + 3];
+    if ((next_ch == 0 || next_ch == '.' || next_ch == ' ')) {
+      return scp_command.replace(pos, 3, "sftp");
+    }
+    ++pos;
   }
 
+  return std::string();
+}
+
+absl::Status RemoteUtil::Scp(std::vector<std::string> source_filepaths,
+                             const std::string& dest, bool compress) {
   std::string source_args;
   for (const std::string& sourceFilePath : source_filepaths) {
     // Workaround for scp thinking that C is a host in C:\path\to\foo.
-    source_args += QuoteArgument("//./" + sourceFilePath) + " ";
+    if (absl::StrContains(path::GetDrivePrefix(sourceFilePath), ":")) {
+      source_args += QuoteForWindows("//./" + sourceFilePath) + " ";
+    } else {
+      source_args += QuoteForWindows(sourceFilePath) + " ";
+    }
   }
 
   // -p preserves timestamps. This enables timestamp-based up-to-date checks.
   ProcessStartInfo start_info;
+  start_info.flags = ProcessFlags::kNoWindow;
   start_info.command = absl::StrFormat(
-      "%s "
-      "%s %s -p -T "
-      "-P %i %s "
-      "%s",
+      "%s %s %s -p -T "
+      "%s %s:%s",
       scp_command_, quiet_ || verbosity_ < 2 ? "-q" : "", compress ? "-C" : "",
-      ssh_port_, source_args, QuoteArgument(user_host_ + ":" + dest));
+      source_args, QuoteForWindows(user_host_), QuoteForWindows(dest));
   start_info.name = "scp";
   start_info.forward_output_to_log = forward_output_to_log_;
 
   return process_factory_->Run(start_info);
 }
 
-absl::Status RemoteUtil::Sync(std::vector<std::string> source_filepaths,
-                              const std::string& dest) {
-  absl::Status status = CheckHostPort();
-  if (!status.ok()) {
-    return status;
-  }
+absl::Status RemoteUtil::Sftp(const std::string& commands,
+                              const std::string& initial_local_dir,
+                              bool compress) {
+  // sftp doesn't take |commands| as argument, so write it to a temp file.
+  std::string cmd_path =
+      path::Join(path::GetTempDir(), "__sftp_cmd__" + Util::GenerateUniqueId());
+  RETURN_IF_ERROR(path::WriteFile(cmd_path, commands),
+                  "Failed to write sftp commands to '%s'", cmd_path);
 
-  std::string source_args;
-  for (const std::string& sourceFilePath : source_filepaths) {
-    source_args += QuoteArgument(sourceFilePath) + " ";
-  }
-
+  // -p preserves timestamps. This enables timestamp-based up-to-date checks.
   ProcessStartInfo start_info;
+  start_info.flags = ProcessFlags::kNoWindow;
   start_info.command = absl::StrFormat(
-      "cdc_rsync --ip=%s --port=%i -z "
-      "%s %s%s",
-      QuoteArgument(user_host_), ssh_port_,
-      quiet_ || verbosity_ < 2 ? "-q " : " ", source_args, QuoteArgument(dest));
-  start_info.name = "cdc_rsync";
+      "%s %s %s -p -b %s %s", sftp_command_,
+      quiet_ || verbosity_ < 2 ? "-q" : "", compress ? "-C" : "",
+      QuoteForWindows(cmd_path), QuoteForWindows(user_host_));
+  start_info.name = "sftp";
+  start_info.startup_dir = initial_local_dir;
   start_info.forward_output_to_log = forward_output_to_log_;
 
-  return process_factory_->Run(start_info);
+  RETURN_IF_ERROR(process_factory_->Run(start_info));
+
+  // Note: Keep |cmd_path| in case of an error for debugging purposes.
+  path::RemoveFile(cmd_path).IgnoreError();
+  return absl::OkStatus();
 }
 
 absl::Status RemoteUtil::Chmod(const std::string& mode,
                                const std::string& remote_path, bool quiet) {
   std::string remote_command =
-      absl::StrFormat("chmod %s %s %s", QuoteArgument(mode),
-                      EscapeForWindows(remote_path), quiet ? "-f" : "");
+      absl::StrFormat("chmod %s %s %s", QuoteForSsh(mode),
+                      QuoteForSsh(remote_path), quiet ? "-f" : "");
 
   return Run(remote_command, "chmod");
 }
 
-absl::Status RemoteUtil::Rm(const std::string& remote_path, bool force) {
-  std::string remote_command = absl::StrFormat("rm %s %s", force ? "-f" : "",
-                                               EscapeForWindows(remote_path));
-
-  return Run(remote_command, "rm");
-}
-
-absl::Status RemoteUtil::Mv(const std::string& old_remote_path,
-                            const std::string& new_remote_path) {
-  std::string remote_command =
-      absl::StrFormat("mv %s %s", EscapeForWindows(old_remote_path),
-                      EscapeForWindows(new_remote_path));
-
-  return Run(remote_command, "mv");
-}
-
 absl::Status RemoteUtil::Run(std::string remote_command, std::string name) {
-  absl::Status status = CheckHostPort();
-  if (!status.ok()) {
-    return status;
-  }
-
   ProcessStartInfo start_info =
       BuildProcessStartInfoForSsh(std::move(remote_command));
   start_info.name = std::move(name);
@@ -152,9 +155,9 @@ ProcessStartInfo RemoteUtil::BuildProcessStartInfoForSsh(
 
 ProcessStartInfo RemoteUtil::BuildProcessStartInfoForSshPortForward(
     int local_port, int remote_port, bool reverse) {
-  // (internal): Usually, one would pass in -N here, but this makes the
-  // connection terribly slow! As a workaround, don't use -N (will open a
-  // shell), but simply eat the output.
+  // Usually, one would pass in -N here, but this makes the connection terribly
+  // slow! As a workaround, don't use -N (will open a shell), but simply eat the
+  // output.
   ProcessStartInfo si = BuildProcessStartInfoForSshInternal(
       GetPortForwardingArg(local_port, remote_port, reverse) + "-n ", "");
   si.stdout_handler = [](const void*, size_t) { return absl::OkStatus(); };
@@ -172,43 +175,63 @@ ProcessStartInfo RemoteUtil::BuildProcessStartInfoForSshInternal(
     std::string forward_arg, std::string remote_command_arg) {
   ProcessStartInfo start_info;
   start_info.command = absl::StrFormat(
-      "%s "
-      "%s -tt "
+      "%s %s -tt %s "
       "-oServerAliveCountMax=6 "  // Number of lost msgs before ssh terminates
       "-oServerAliveInterval=5 "  // Time interval between alive msgs
-      "%s %s -p %i %s",
+      "%s %s",
       ssh_command_, quiet_ || verbosity_ < 2 ? "-q" : "", forward_arg,
-      QuoteArgument(user_host_), ssh_port_, remote_command_arg);
+      QuoteForWindows(user_host_), remote_command_arg);
   start_info.forward_output_to_log = forward_output_to_log_;
+  start_info.flags = ProcessFlags::kNoWindow;
   return start_info;
 }
 
-std::string RemoteUtil::EscapeForWindows(const std::string& argument) {
-  std::string str =
+std::string RemoteUtil::QuoteForWindows(const std::string& argument) {
+  // Escape certain backslashes (see doc of this function).
+  std::string escaped =
       std::regex_replace(argument, std::regex(R"(\\*(?="|$))"), "$&$&");
-  return std::regex_replace(str, std::regex(R"(")"), R"(\")");
+  // Escape " -> \".
+  escaped = std::regex_replace(escaped, std::regex(R"(")"), R"(\")");
+  // Quote.
+  return absl::StrCat("\"", escaped, "\"");
 }
 
-std::string RemoteUtil::QuoteArgument(const std::string& argument) {
-  return absl::StrCat("\"", EscapeForWindows(argument), "\"");
-}
+std::string RemoteUtil::QuoteForSsh(const std::string& argument) {
+  // Escape \ ->: \\.
+  std::string escaped =
+      std::regex_replace(argument, std::regex(R"(\\)"), R"(\\)");
+  // Escape " -> \".
+  escaped = std::regex_replace(escaped, std::regex(R"(")"), R"(\")");
 
-std::string RemoteUtil::QuoteArgumentForSsh(const std::string& argument) {
-  return absl::StrFormat(
-      "'%s'", std::regex_replace(argument, std::regex("'"), "'\\''"));
-}
-
-std::string RemoteUtil::QuoteAndEscapeArgumentForSsh(
-    const std::string& argument) {
-  return EscapeForWindows(QuoteArgumentForSsh(argument));
-}
-
-absl::Status RemoteUtil::CheckHostPort() {
-  if (user_host_.empty() || ssh_port_ == 0) {
-    return MakeStatus("IP or port not set");
+  // Quote, but handle special case for ~.
+  if (escaped.empty() || escaped[0] != '~') {
+    return QuoteForWindows(absl::StrCat("\"", escaped, "\""));
   }
 
-  return absl::OkStatus();
+  // Simple special cases. Quote() isn't required, but called for consistency.
+  if (escaped == "~" || escaped == "~/") {
+    return QuoteForWindows(escaped);
+  }
+
+  // Check whether the username contains only valid characters.
+  // E.g. ~user name/foo -> Quote(~user name/foo)
+  size_t slash_pos = escaped.find('/');
+  size_t username_end_pos =
+      slash_pos == std::string::npos ? escaped.size() : slash_pos;
+  if (username_end_pos > 1 &&
+      !std::regex_match(escaped.substr(1, username_end_pos - 1),
+                        std::regex("^[a-z][-a-z0-9]*"))) {
+    return QuoteForWindows(absl::StrCat("\"", escaped, "\""));
+  }
+
+  if (slash_pos == std::string::npos) {
+    // E.g. ~username -> Quote(~username)
+    return QuoteForWindows(escaped);
+  }
+
+  // E.g.  or ~username/foo -> Quote(~username/"foo")
+  return QuoteForWindows(absl::StrCat(escaped.substr(0, slash_pos + 1), "\"",
+                                      escaped.substr(slash_pos + 1), "\""));
 }
 
 }  // namespace cdc_ft

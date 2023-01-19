@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
 package(default_visibility = ["//visibility:public"])
 
 # Using a cc_binary rule here to avoid that this test is included when running
@@ -28,6 +30,7 @@ cc_binary(
         "//common:path_filter",
         "//common:platform",
         "//common:port_manager",
+        "//common:port_range_parser",
         "//common:process",
         "//common:remote_util",
         "//common:sdk_util",

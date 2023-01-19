@@ -99,11 +99,14 @@ enum class FolderId {
 
 // Returns the Windows known folder path for the given |folder_id|.
 absl::Status GetKnownFolderPath(FolderId folder_id, std::string* path);
-
-// Expands environment path variables like %APPDATA%. Variables are matched
-// case invariantly. Unknown environment variables are not changed.
-absl::Status ExpandEnvironmentPathVariables(std::string* path);
 #endif
+
+// Expands environment path variables like %APPDATA% on Windows or ~ on Linux.
+// On Windows, variables are matched case invariantly. Unknown environment
+// variables are not changed.
+// On Linux, performs a shell-like expansion. Returns an error if multiple
+// results would be returned, e.g. from *.txt.
+absl::Status ExpandPathVariables(std::string* path);
 
 // Returns the environment variable with given |name| in |value|.
 // Returns a NotFound error and sets |value| to an empty string if the variable
@@ -126,6 +129,9 @@ std::string GetDrivePrefix(const std::string& path);
 
 // Gets the current working directory.
 std::string GetCwd();
+
+// Sets the current working directory.
+void SetCwd(const std::string& path);
 
 // Expands a relative path to an absolute path (relative to the current working
 // directory). Also canonicalizes the path, removing any . and .. elements.
